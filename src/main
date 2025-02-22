@@ -1,0 +1,190 @@
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+import xgboost as xgb
+import json
+import joblib
+import seaborn as sns
+import matplotlib.pyplot as plt
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional, Input, Attention
+from tensorflow.keras.optimizers import Adam
+from sklearn.model_selection import train_test_split, RandomizedSearchCV
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc, precision_recall_curve
+from sklearn.utils.class_weight import compute_class_weight
+from imblearn.over_sampling import SMOTE
+from scipy.stats import uniform, randint
+from sklearn.linear_model import LogisticRegression
+
+# Load JSON Dataset
+json_path = r"C:\Users\TamilSelvan\Downloads\upi_fraud_dataset_v3.json"
+with open(json_path, "r") as file:
+    data = json.load(file)
+df = pd.json_normalize(data)  # Flatten nested JSON
+
+# Check if dataset is empty
+if df.empty:
+    raise ValueError("Error: Loaded dataset is empty!")
+
+# Remove duplicates
+df.drop_duplicates(inplace=True)
+
+# Drop Unique Identifiers
+non_numeric_cols = df.select_dtypes(include=["object"]).columns
+drop_cols = [col for col in non_numeric_cols if df[col].nunique() == df.shape[0]]
+df.drop(columns=drop_cols, inplace=True)
+
+# Label Encoding for Categorical Variables
+label_encoders = {}
+for col in df.select_dtypes(include=["object"]).columns:
+    le = LabelEncoder()
+    df[col] = le.fit_transform(df[col])
+    label_encoders[col] = le
+
+# Fill Missing Values with Median
+df.fillna(df.median(numeric_only=True), inplace=True)
+
+# Ensure "Fraud_Label" Exists
+if "Fraud_Label" not in df.columns:
+    raise ValueError("Error: 'Fraud_Label' column is missing!")
+
+# Feature Selection - Remove Highly Correlated Features
+corr_matrix = df.corr(numeric_only=True)
+high_corr_features = [col for col in corr_matrix.columns if (corr_matrix[col].abs() > 0.9).sum() > 1 and col != "Fraud_Label"]
+
+# Keep at least 5 features
+if len(df.columns) - len(high_corr_features) < 5:
+    high_corr_features = high_corr_features[:max(0, len(high_corr_features) - 5)]
+df.drop(columns=high_corr_features, inplace=True)
+
+# Ensure at least one feature remains
+if df.shape[1] <= 1:
+    raise ValueError("🚨 ERROR: No valid features left after preprocessing!")
+
+# Split Features and Labels
+X = df.drop(columns=["Fraud_Label"])
+y = df["Fraud_Label"]
+
+# Normalize Features
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+# Handle Class Imbalance Using SMOTE
+if y.value_counts().min() < 2:
+    raise ValueError("🚨 ERROR: Too few fraud samples for SMOTE!")
+smote = SMOTE(sampling_strategy=0.5, random_state=42)
+X_resampled, y_resampled = smote.fit_resample(X_scaled, y)
+
+# Split Data
+X_train, X_test, y_train, y_test = train_test_split(X_resampled, y_resampled, test_size=0.2, random_state=42)
+
+# Reshape Data for LSTM
+X_train_lstm = X_train.reshape((X_train.shape[0], 1, X_train.shape[1]))
+X_test_lstm = X_test.reshape((X_test.shape[0], 1, X_test.shape[1]))
+
+# Compute Class Weights
+class_weights = compute_class_weight("balanced", classes=np.unique(y_train), y=y_train)
+class_weight_dict = {i: class_weights[i] for i in range(len(class_weights))}
+
+# Train XGBoost Model with Hyperparameter Tuning
+xgb_model = xgb.XGBClassifier(objective="binary:logistic", eval_metric="logloss", tree_method="hist")
+param_dist = {
+    "n_estimators": randint(100, 500),
+    "max_depth": randint(3, 15),
+    "learning_rate": uniform(0.01, 0.3),
+    "subsample": uniform(0.6, 0.9),
+    "colsample_bytree": uniform(0.6, 0.9)
+}
+
+random_search = RandomizedSearchCV(xgb_model, param_distributions=param_dist, n_iter=20, cv=3, random_state=42, n_jobs=-1)
+random_search.fit(X_train, y_train)
+best_xgb = random_search.best_estimator_
+
+# Define LSTM Model with Attention
+def build_lstm_attention(input_shape):
+    inputs = Input(shape=input_shape)
+    lstm_out = Bidirectional(LSTM(64, return_sequences=True))(inputs)
+    attention = Attention()([lstm_out, lstm_out])  # Self-Attention
+    lstm_out = Bidirectional(LSTM(32))(attention)
+    dropout = Dropout(0.2)(lstm_out)
+    outputs = Dense(1, activation="sigmoid")(dropout)
+    model = Model(inputs, outputs)
+    model.compile(optimizer=Adam(learning_rate=0.001), loss="binary_crossentropy", metrics=["accuracy"])
+    return model
+
+lstm_model = build_lstm_attention((1, X_train.shape[1]))
+
+# Train LSTM
+lstm_model.fit(
+    X_train_lstm, y_train,
+    epochs=25,
+    batch_size=64,
+    validation_data=(X_test_lstm, y_test),
+    class_weight=class_weight_dict,
+    verbose=1
+)
+
+# Get Predictions from Models
+xgb_preds = best_xgb.predict_proba(X_test)[:, 1]
+lstm_preds = lstm_model.predict(X_test_lstm).flatten()
+
+# Ensemble Learning - Meta Model (Logistic Regression)
+meta_X_train = np.vstack((lstm_preds, xgb_preds)).T
+meta_model = LogisticRegression()
+meta_model.fit(meta_X_train, y_test)
+
+# Compute Performance Metrics Correctly
+meta_test_X_proba = np.vstack((lstm_preds, xgb_preds)).T  # Use raw probabilities
+meta_final_preds = meta_model.predict(meta_test_X_proba)   # Get final binary predictions
+
+# Classification Report
+report = classification_report(y_test, meta_final_preds, digits=4, output_dict=True)
+
+# Extract Correct Metrics
+accuracy = report["accuracy"]
+macro_f1 = report["macro avg"]["f1-score"]
+micro_f1 = report["weighted avg"]["f1-score"]  # Use 'weighted avg' for micro-F1
+precision = report["macro avg"]["precision"]
+recall = report["macro avg"]["recall"]
+
+# Print Metrics
+print(f"🎯 Accuracy: {accuracy:.4f}")
+print(f"📊 Micro F1-Score: {micro_f1:.4f}")  # Corrected Micro F1-Score
+print(f"📊 Macro F1-Score: {macro_f1:.4f}")
+print(f"🔍 Precision: {precision:.4f}")
+print(f"🎯 Recall: {recall:.4f}")
+
+# Confusion Matrix
+plt.figure(figsize=(8,6))
+sns.heatmap(confusion_matrix(y_test, meta_final_preds), annot=True, fmt='d', cmap="Blues",
+            xticklabels=["No Fraud", "Fraud"], yticklabels=["No Fraud", "Fraud"])
+plt.xlabel("Predicted")
+plt.ylabel("Actual")
+plt.title("Confusion Matrix - Meta Model")
+plt.show()
+
+# ROC Curve (Use Probabilities)
+plt.figure(figsize=(8,6))
+for model, preds, label in zip([best_xgb, lstm_model, meta_model], [xgb_preds, lstm_preds, meta_test_X_proba[:, 1]], ["XGBoost", "LSTM", "Ensemble"]):
+    fpr, tpr, _ = roc_curve(y_test, preds)
+    plt.plot(fpr, tpr, label=f"{label} (AUC = {auc(fpr, tpr):.4f})")
+
+plt.plot([0,1], [0,1], 'k--')
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC Curve")
+plt.legend()
+plt.show()
+
+# Precision-Recall Curve
+plt.figure(figsize=(8,6))
+for model, preds, label in zip([best_xgb, lstm_model, meta_model], [xgb_preds, lstm_preds, meta_test_X_proba[:, 1]], ["XGBoost", "LSTM", "Ensemble"]):
+    precision, recall, _ = precision_recall_curve(y_test, preds)
+    plt.plot(recall, precision, label=f"{label}")
+
+plt.xlabel("Recall")
+plt.ylabel("Precision")
+plt.title("Precision-Recall Curve")
+plt.legend()
+plt.show()
