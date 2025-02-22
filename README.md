@@ -123,12 +123,3 @@ python fraud_detection.py
 💾 **Deploy model as a REST API using FastAPI**  
 
 ---  
-
-## 🔖 License  
-
-📜 This project is **open-source** and licensed under the **MIT License**.  
-
----  
-
-👨‍💻 **Developed by Arun Gopal R** | 💻 AI & Data Science Enthusiast 🚀  
-📧 Feel free to reach out for collaborations!  
