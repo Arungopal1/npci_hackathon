@@ -105,13 +105,10 @@ python fraud_detection.py
 ## 🎨 Visualizations  
 
 📌 **Confusion Matrix Example**  
-![Confusion Matrix](https://github.com/yourusername/UPI-Fraud-Detection/blob/main/images/confusion_matrix.png)  
+![Confusion Matrix](https://github.com/Arungopal1/npci_hackathon/blob/main/src/Output%20images/confusionmatrix.png)  
 
 📌 **ROC Curve Example**  
-![ROC Curve](https://github.com/yourusername/UPI-Fraud-Detection/blob/main/images/roc_curve.png)  
-
-📌 **Precision-Recall Curve Example**  
-![PR Curve](https://github.com/yourusername/UPI-Fraud-Detection/blob/main/images/pr_curve.png)  
+![ROC Curve](https://github.com/Arungopal1/npci_hackathon/blob/main/src/Output%20images/Roc%20curve.png)  
 
 ---  
 
